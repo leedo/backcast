@@ -1,5 +1,6 @@
 package backcast
 
 type Config struct {
-	file string
+	File   string
+	Listen string
 }

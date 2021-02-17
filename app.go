@@ -108,12 +108,13 @@ func (a *App) updateStaleFeeds(ctx context.Context) error {
 		return err
 	}
 	for _, f := range feeds {
+		log.Printf("checking feed %d (%s) for updates", f.ID, f.URL)
 		ok, err := a.updateFeed(ctx, f)
 		if err != nil {
 			log.Printf("failed to update feed %d (%s): %v", f.ID, f.URL, err)
 		}
 		if ok {
-			log.Printf("updated feed %d (%s): %v", f.ID, f.URL)
+			log.Printf("updated feed %d (%s)", f.ID, f.URL)
 		}
 	}
 

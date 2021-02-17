@@ -6,9 +6,9 @@ const schema = `
 CREATE TABLE IF NOT EXISTS feed (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     url VARCHAR(2048) NOT NULL,
-	etag VARCHAR(255) DEFAULT "",
-	last_update DATETIME,
-	created_at DATETIME NOT NULL
+    etag VARCHAR(255) DEFAULT "",
+    last_update DATETIME,
+    created_at DATETIME NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON feed(url);
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     feed INTEGER NOT NULL,
     diff TEXT NOT NULL,
-	checksum VARCHAR(40) NOT NULL,
+    checksum VARCHAR(40) NOT NULL,
     created_at DATETIME NOT NULL
 );
 

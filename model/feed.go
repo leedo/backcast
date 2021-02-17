@@ -36,6 +36,31 @@ func GetFeed(ctx context.Context, id string, db *sql.Tx) (Feed, error) {
 	return f, nil
 }
 
+func FindStaleFeeds(ctx context.Context, d time.Duration, limit int, tx *sql.Tx) ([]Feed, error) {
+	const query = `SELECT id, url, etag FROM feed WHERE last_update < ? LIMIT ?`
+
+	t := time.Now().Add(-d)
+	rows, err := tx.QueryContext(ctx, query, t, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	var feeds []Feed
+	for rows.Next() {
+		var f Feed
+		if err := rows.Scan(&f.ID, &f.URL, &f.Etag); err != nil {
+			return nil, err
+		}
+		feeds = append(feeds, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return feeds, nil
+}
+
 func CreateFeed(ctx context.Context, url string, db *sql.Tx) (Feed, error) {
 	var f Feed
 	now := time.Now()
@@ -130,8 +155,18 @@ func (f Feed) BuildFeed(ctx context.Context, checksum string, db *sql.Tx) (strin
 		return "", err
 	}
 
-	if checksum != "" && sha != checksum {
-		return "", fmt.Errorf("unknown revision %s", checksum)
+	if checksum != "" {
+		if sha != checksum {
+			return "", fmt.Errorf("unknown revision %s", checksum)
+		}
+
+		sum := sha1.Sum([]byte(feed))
+		hex := fmt.Sprintf("%x", sum)
+
+		if hex != checksum {
+			return "", fmt.Errorf("feed checksum does not match")
+		}
+
 	}
 
 	return feed, nil

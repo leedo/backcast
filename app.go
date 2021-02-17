@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/leedo/backcast/model"
@@ -58,12 +59,12 @@ func (a *App) Run(ctx context.Context) {
 	defer a.db.Close()
 
 	router := httprouter.New()
-	router.GET("/feed/:id", a.feedHandler)
-	router.POST("/feed", a.createFeedHandler)
-	router.PATCH("/feed/:id", a.updateFeedHandler)
-	router.GET("/feed/:id/history", a.feedHistoryHandler)
-	router.GET("/feed/:id/rss", a.feedRSSHandler)
-	router.GET("/feed/:id/rss/:sha", a.feedSHARSSHandler)
+	router.GET("/api/feed/:id", a.feedHandler)
+	router.POST("/api/feed", a.createFeedHandler)
+	router.PATCH("/api/feed/:id", a.updateFeedHandler)
+	router.GET("/api/feed/:id/history", a.feedHistoryHandler)
+	router.GET("/api/feed/:id/rss", a.feedRSSHandler)
+	router.GET("/api/feed/:id/rss/:sha", a.feedSHARSSHandler)
 
 	go a.startScanner(ctx)
 
@@ -72,6 +73,8 @@ func (a *App) Run(ctx context.Context) {
 }
 
 func (a *App) startScanner(ctx context.Context) error {
+	t := time.NewTicker(1 * time.Minute)
+
 	for {
 		select {
 		case f := <-a.refresh:
@@ -79,10 +82,36 @@ func (a *App) startScanner(ctx context.Context) error {
 			if err := a.updateFeed(ctx, f); err != nil {
 				log.Printf("failed to update feed %d (%s): %v", f.ID, f.URL, err)
 			}
+		case <-t.C:
+			log.Println("scanning for stale feeds")
+			if err := a.updateStaleFeeds(ctx); err != nil {
+				log.Printf("%v", err)
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func (a *App) updateStaleFeeds(ctx context.Context) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+
+	feeds, err := model.FindStaleFeeds(ctx, 1*time.Hour, 5, tx)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	for _, f := range feeds {
+		if err := a.updateFeed(ctx, f); err != nil {
+			log.Printf("failed to update feed %d (%s): %v", f.ID, f.URL, err)
+		}
+	}
+
+	tx.Commit()
+	return nil
 }
 
 func (a *App) updateFeed(ctx context.Context, f model.Feed) error {

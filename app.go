@@ -3,7 +3,6 @@ package backcast
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -58,6 +57,8 @@ func (a *App) Run(ctx context.Context) {
 
 	defer a.db.Close()
 
+	go a.startScanner(ctx)
+
 	router := httprouter.New()
 	router.GET("/api/feed/:id", a.feedHandler)
 	router.POST("/api/feed", a.createFeedHandler)
@@ -65,8 +66,6 @@ func (a *App) Run(ctx context.Context) {
 	router.GET("/api/feed/:id/history", a.feedHistoryHandler)
 	router.GET("/api/feed/:id/rss", a.feedRSSHandler)
 	router.GET("/api/feed/:id/rss/:sha", a.feedSHARSSHandler)
-
-	go a.startScanner(ctx)
 
 	log.Printf("listening on %s", a.config.Listen)
 	log.Fatal(http.ListenAndServe(a.config.Listen, router))
@@ -79,8 +78,12 @@ func (a *App) startScanner(ctx context.Context) error {
 		select {
 		case f := <-a.refresh:
 			log.Printf("updating feed %d (%s)", f.ID, f.URL)
-			if err := a.updateFeed(ctx, f); err != nil {
+			ok, err := a.updateFeed(ctx, f)
+			if err != nil {
 				log.Printf("failed to update feed %d (%s): %v", f.ID, f.URL, err)
+			}
+			if ok {
+				log.Printf("updated feed %d (%s)", f.ID, f.URL)
 			}
 		case <-t.C:
 			log.Println("scanning for stale feeds")
@@ -105,8 +108,12 @@ func (a *App) updateStaleFeeds(ctx context.Context) error {
 		return err
 	}
 	for _, f := range feeds {
-		if err := a.updateFeed(ctx, f); err != nil {
+		ok, err := a.updateFeed(ctx, f)
+		if err != nil {
 			log.Printf("failed to update feed %d (%s): %v", f.ID, f.URL, err)
+		}
+		if ok {
+			log.Printf("updated feed %d (%s): %v", f.ID, f.URL)
 		}
 	}
 
@@ -114,7 +121,7 @@ func (a *App) updateStaleFeeds(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) updateFeed(ctx context.Context, f model.Feed) error {
+func (a *App) updateFeed(ctx context.Context, f model.Feed) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", f.URL, nil)
 	if f.Etag != "" {
 		req.Header.Add("If-None-Match", f.Etag)
@@ -122,191 +129,34 @@ func (a *App) updateFeed(ctx context.Context, f model.Feed) error {
 
 	resp, err := http.Get(f.URL)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	tx, err := a.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	if err = f.CommitDiff(ctx, string(body), tx); err != nil {
+	ok, err := f.CommitDiff(ctx, string(body), tx)
+	if err != nil {
 		tx.Rollback()
-		return err
+		return false, err
 	}
 
 	etag := resp.Header.Get("Etag")
 	if etag != "" {
 		if err = f.UpdateEtag(ctx, etag, tx); err != nil {
 			tx.Rollback()
-			return err
+			return false, err
 		}
 	}
 
 	tx.Commit()
 
-	return nil
-}
-
-func (a *App) updateFeedHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-	tx, err := a.db.Begin()
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	defer tx.Rollback()
-
-	feed, err := model.GetFeed(ctx, ps.ByName("id"), tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	a.refresh <- feed
-	fmt.Fprint(w, `{"status":"ok"}`)
-}
-
-func (a *App) createFeedHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	var f model.Feed
-
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&f); err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	tx, err := a.db.Begin()
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	feed, err := model.CreateFeed(ctx, f.URL, tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	tx.Commit()
-
-	a.refresh <- feed
-
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(feed); err != nil {
-		jsonError(err, w)
-		return
-	}
-}
-
-func (a *App) feedHistoryHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	tx, err := a.db.Begin()
-	if err != nil {
-		jsonError(err, w)
-	}
-
-	defer tx.Rollback()
-
-	feed, err := model.GetFeed(ctx, ps.ByName("id"), tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	history, err := feed.History(ctx, tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(history); err != nil {
-		jsonError(err, w)
-		return
-	}
-}
-
-func (a *App) feedRSSHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	tx, err := a.db.Begin()
-	if err != nil {
-		jsonError(err, w)
-	}
-
-	defer tx.Rollback()
-
-	feed, err := model.GetFeed(ctx, ps.ByName("id"), tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	rss, err := feed.BuildFeed(ctx, "", tx)
-	if err != nil {
-		jsonError(err, w)
-	}
-
-	fmt.Fprint(w, rss)
-}
-
-func (a *App) feedSHARSSHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	tx, err := a.db.Begin()
-	if err != nil {
-		jsonError(err, w)
-	}
-
-	defer tx.Rollback()
-
-	feed, err := model.GetFeed(ctx, ps.ByName("id"), tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	rss, err := feed.BuildFeed(ctx, ps.ByName("sha"), tx)
-	if err != nil {
-		jsonError(err, w)
-	}
-
-	fmt.Fprint(w, rss)
-}
-
-func (a *App) feedHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	tx, err := a.db.Begin()
-	if err != nil {
-		jsonError(err, w)
-	}
-
-	defer tx.Rollback()
-
-	feed, err := model.GetFeed(ctx, ps.ByName("id"), tx)
-	if err != nil {
-		jsonError(err, w)
-		return
-	}
-
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(feed); err != nil {
-		jsonError(err, w)
-		return
-	}
-}
-
-func jsonError(err error, w http.ResponseWriter) {
-	fmt.Fprint(w, err)
+	return ok, nil
 }

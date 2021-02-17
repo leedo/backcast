@@ -84,10 +84,10 @@ func CreateFeed(ctx context.Context, url string, db *sql.Tx) (Feed, error) {
 	}, nil
 }
 
-func (f Feed) CommitDiff(ctx context.Context, body string, db *sql.Tx) error {
+func (f Feed) CommitDiff(ctx context.Context, body string, db *sql.Tx) (bool, error) {
 	current, err := f.BuildFeed(ctx, "", db)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	dmp := diffmatchpatch.New()
@@ -95,7 +95,7 @@ func (f Feed) CommitDiff(ctx context.Context, body string, db *sql.Tx) error {
 	patch := dmp.PatchMake(current, diffs)
 
 	if len(patch) == 0 {
-		return nil
+		return false, nil
 	}
 
 	sum := sha1.Sum([]byte(body))
@@ -104,9 +104,9 @@ func (f Feed) CommitDiff(ctx context.Context, body string, db *sql.Tx) error {
 	const query = `INSERT INTO history (feed, diff, checksum, created_at) VALUES(?,?,?,?)`
 	_, err = db.ExecContext(ctx, query, f.ID, dmp.PatchToText(patch), hex, time.Now())
 	if err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func (f Feed) BuildFeed(ctx context.Context, checksum string, db *sql.Tx) (string, error) {

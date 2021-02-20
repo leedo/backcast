@@ -65,7 +65,7 @@ func (a *App) Run(ctx context.Context) {
 	router.PATCH("/api/feed/:id", a.updateFeedHandler)
 	router.GET("/api/feed/:id/history", a.feedHistoryHandler)
 	router.GET("/api/feed/:id/rss", a.feedRSSHandler)
-	router.GET("/api/feed/:id/rss/:sha", a.feedSHARSSHandler)
+	router.GET("/api/feed/:id/rss/:rev", a.feedRevisionRSSHandler)
 
 	log.Printf("listening on %s", a.config.Listen)
 	log.Fatal(http.ListenAndServe(a.config.Listen, router))
@@ -124,8 +124,18 @@ func (a *App) updateStaleFeeds(ctx context.Context) error {
 
 func (a *App) updateFeed(ctx context.Context, f model.Feed) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", f.URL, nil)
-	if f.Etag != "" {
-		req.Header.Add("If-None-Match", f.Etag)
+	if err != nil {
+		return false, err
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return false, err
+	}
+
+	r, err := f.GetCurrentRevision(ctx, tx)
+	if err == nil && r.Etag != "" {
+		req.Header.Add("If-None-Match", r.Etag)
 	}
 
 	resp, err := http.Get(f.URL)
@@ -138,23 +148,12 @@ func (a *App) updateFeed(ctx context.Context, f model.Feed) (bool, error) {
 		return false, err
 	}
 
-	tx, err := a.db.Begin()
-	if err != nil {
-		return false, err
-	}
-
-	ok, err := f.CommitDiff(ctx, string(body), tx)
+	contentType := resp.Header.Get("Content-Type")
+	newEtag := resp.Header.Get("Etag")
+	ok, err := f.CommitDiff(ctx, string(body), newEtag, contentType, tx)
 	if err != nil {
 		tx.Rollback()
 		return false, err
-	}
-
-	etag := resp.Header.Get("Etag")
-	if etag != "" {
-		if err = f.UpdateEtag(ctx, etag, tx); err != nil {
-			tx.Rollback()
-			return false, err
-		}
 	}
 
 	tx.Commit()

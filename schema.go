@@ -24,7 +24,7 @@ func init() {
 CREATE TABLE feed (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     url VARCHAR(2048) NOT NULL,
-    etag VARCHAR(255) DEFAULT "",
+    current_revision INTEGER,
     last_update DATETIME,
     created_at DATETIME NOT NULL
 )`)
@@ -40,6 +40,9 @@ CREATE TABLE history (
     feed INTEGER NOT NULL,
     diff TEXT NOT NULL,
     checksum VARCHAR(40) NOT NULL,
+    etag VARCHAR(255),
+    content_length INTEGER NOT NULL,
+    content_type VARCHAR(255),
     created_at DATETIME NOT NULL
 )`)
 
@@ -59,7 +62,8 @@ func (a *App) initSchema(ctx context.Context) error {
 	}
 
 	for i, m := range migrations {
-		_, err := a.db.QueryContext(ctx, schemaExists, i)
+		var v string
+		err := a.db.QueryRowContext(ctx, schemaExists, i).Scan(&v)
 		if err == sql.ErrNoRows {
 			log.Println(m)
 			if _, err := a.db.ExecContext(ctx, m); err != nil {

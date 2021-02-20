@@ -11,33 +11,59 @@ import (
 )
 
 type Feed struct {
-	ID         int64      `json:"id"`
-	URL        string     `json:"url"`
-	LastUpdate *time.Time `json:"last_update"`
-	CreatedAt  time.Time  `json:"created_at"`
-	Etag       string     `json:"etag"`
+	ID              int64      `json:"id"`
+	URL             string     `json:"url"`
+	LastUpdate      *time.Time `json:"last_update"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CurrentRevision string     `json:"current_revision"`
 }
 
-type Diff struct {
-	ID        int64     `json:"id"`
-	Diff      string    `json:"diff,omitempty"`
-	Checksum  string    `json:"checksum"`
-	CreatedAt time.Time `json:"created_at"`
+type Revision struct {
+	ID            int64     `json:"id"`
+	Diff          string    `json:"diff,omitempty"`
+	Checksum      string    `json:"checksum"`
+	ContentType   string    `json:"type"`
+	ContentLength string    `json:"length"`
+	Etag          string    `json:"etag"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+func (f Feed) GetRevision(ctx context.Context, id string, db *sql.Tx) (Revision, error) {
+
+	const query = `SELECT id, diff, checksum, etag, content_length, content_type, created_at FROM history WHERE feed=? AND id=?`
+	var r Revision
+
+	if err := db.QueryRowContext(ctx, query, f.ID, id).Scan(&r.ID, &r.Diff, &r.Checksum, &r.Etag, &r.ContentLength, &r.ContentType, &r.CreatedAt); err != nil {
+		return r, err
+	}
+
+	return r, nil
 }
 
 func GetFeed(ctx context.Context, id string, db *sql.Tx) (Feed, error) {
-	const query = `SELECT id, url, last_update, created_at, etag FROM feed WHERE id=?`
+	const query = `SELECT id, url, last_update, created_at, current_revision FROM feed WHERE id=?`
 	var f Feed
 
-	if err := db.QueryRowContext(ctx, query, id).Scan(&f.ID, &f.URL, &f.LastUpdate, &f.CreatedAt, &f.Etag); err != nil {
+	if err := db.QueryRowContext(ctx, query, id).Scan(&f.ID, &f.URL, &f.LastUpdate, &f.CreatedAt, &f.CurrentRevision); err != nil {
 		return f, err
 	}
 
 	return f, nil
 }
 
+func (f Feed) GetCurrentRevision(ctx context.Context, db *sql.Tx) (Revision, error) {
+	const query = `SELECT id, diff, checksum, etag, content_length, content_type, created_at FROM history WHERE id=?`
+	var r Revision
+
+	if err := db.QueryRowContext(ctx, query, f.CurrentRevision).Scan(&r.ID, &r.Diff, &r.Checksum, &r.Etag, &r.ContentLength, &r.ContentType, &r.CreatedAt); err != nil {
+		return r, err
+	}
+
+	return r, nil
+}
+
 func FindStaleFeeds(ctx context.Context, d time.Duration, limit int, tx *sql.Tx) ([]Feed, error) {
-	const query = `SELECT id, url, etag FROM feed WHERE last_update < ? LIMIT ?`
+	const query = `SELECT id, url FROM feed WHERE last_update < ? LIMIT ?`
 
 	t := time.Now().Add(-d)
 	rows, err := tx.QueryContext(ctx, query, t, limit)
@@ -48,7 +74,7 @@ func FindStaleFeeds(ctx context.Context, d time.Duration, limit int, tx *sql.Tx)
 	var feeds []Feed
 	for rows.Next() {
 		var f Feed
-		if err := rows.Scan(&f.ID, &f.URL, &f.Etag); err != nil {
+		if err := rows.Scan(&f.ID, &f.URL); err != nil {
 			return nil, err
 		}
 		feeds = append(feeds, f)
@@ -84,7 +110,7 @@ func CreateFeed(ctx context.Context, url string, db *sql.Tx) (Feed, error) {
 	}, nil
 }
 
-func (f Feed) CommitDiff(ctx context.Context, body string, db *sql.Tx) (bool, error) {
+func (f Feed) CommitDiff(ctx context.Context, body string, etag string, contentType string, db *sql.Tx) (bool, error) {
 	current, err := f.BuildFeed(ctx, "", db)
 	if err != nil {
 		return false, err
@@ -101,12 +127,28 @@ func (f Feed) CommitDiff(ctx context.Context, body string, db *sql.Tx) (bool, er
 	sum := sha1.Sum([]byte(body))
 	hex := fmt.Sprintf("%x", sum)
 
-	const query = `INSERT INTO history (feed, diff, checksum, created_at) VALUES(?,?,?,?)`
-	_, err = db.ExecContext(ctx, query, f.ID, dmp.PatchToText(patch), hex, time.Now())
+	const query = `INSERT INTO history (feed, diff, checksum, etag, content_type, content_length, created_at) VALUES(?,?,?,?,?,?,?)`
+	res, err := db.ExecContext(ctx, query, f.ID, dmp.PatchToText(patch), hex, etag, contentType, len(body), time.Now())
 	if err != nil {
 		return false, err
 	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return false, err
+	}
+
+	if err := f.UpdateCurrentRevision(ctx, id, db); err != nil {
+		return false, err
+	}
+
 	return true, nil
+}
+
+func (f Feed) UpdateCurrentRevision(ctx context.Context, revision int64, db *sql.Tx) error {
+	const query = `UPDATE feed SET current_revision=? WHERE id=?`
+	_, err := db.ExecContext(ctx, query, revision, f.ID)
+	return err
 }
 
 func (f Feed) BuildFeed(ctx context.Context, checksum string, db *sql.Tx) (string, error) {
@@ -172,20 +214,11 @@ func (f Feed) BuildFeed(ctx context.Context, checksum string, db *sql.Tx) (strin
 	return feed, nil
 }
 
-func (f Feed) UpdateEtag(ctx context.Context, etag string, db *sql.Tx) error {
-	const query = `UPDATE feed SET etag=? WHERE id=?`
-	_, err := db.ExecContext(ctx, query, f.ID)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (f Feed) History(ctx context.Context, db *sql.Tx) ([]Diff, error) {
+func (f Feed) History(ctx context.Context, db *sql.Tx) ([]Revision, error) {
 	const query = `SELECT id, checksum, created_at FROM history WHERE feed=?`
 	var (
-		diffs []Diff
-		err   error
+		revisions []Revision
+		err       error
 	)
 
 	rows, err := db.QueryContext(ctx, query, f.ID)
@@ -194,16 +227,16 @@ func (f Feed) History(ctx context.Context, db *sql.Tx) ([]Diff, error) {
 	}
 
 	for rows.Next() {
-		var d Diff
-		if err := rows.Scan(&d.ID, &d.Checksum, &d.CreatedAt); err != nil {
+		var r Revision
+		if err := rows.Scan(&r.ID, &r.Checksum, &r.CreatedAt); err != nil {
 			return nil, err
 		}
-		diffs = append(diffs, d)
+		revisions = append(revisions, r)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	return diffs, nil
+	return revisions, nil
 }
